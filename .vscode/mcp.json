@@ -1,0 +1,29 @@
+{
+	"servers": {
+		"serena": {
+			"command": "uvx",
+			"args": [
+				"--from",
+				"git+https://github.com/oraios/serena",
+				"serena",
+				"start-mcp-server",
+				"--context",
+				"ide-assistant"
+			]
+		},
+		"deepwiki": {
+			"command": "npx",
+			"args": [
+				"mcp-remote",
+				"https://mcp.deepwiki.com/sse"
+			]
+		},
+		"playwright": {
+			"command": "npx",
+			"args": [
+				"@playwright/mcp@latest"
+			]
+		}
+	},
+	"inputs": []
+}

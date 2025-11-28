@@ -1,0 +1,56 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: poc-voice-live-api-electricity-plan
+metadata:
+  template: poc-voice-live-api-electricity-plan@0.0.1
+
+infra:
+  provider: bicep
+  path: ./infra
+
+hooks:
+  postprovision:
+    posix:
+      shell: sh
+      run: |
+        echo "================================================"
+        echo "Cosmos DB がプロビジョニングされました"
+        echo "================================================"
+        echo ""
+        echo "次のステップ:"
+        echo "1. .env.local に以下の環境変数を設定してください:"
+        echo ""
+        echo "   COSMOS_ENDPOINT=${COSMOS_ENDPOINT}"
+        echo "   COSMOS_KEY=<Azure Portal から取得>"
+        echo "   COSMOS_DB=${COSMOS_DB}"
+        echo "   COSMOS_CUSTOMERS_CONTAINER=${COSMOS_CUSTOMERS_CONTAINER}"
+        echo "   COSMOS_BILLINGS_CONTAINER=${COSMOS_BILLINGS_CONTAINER}"
+        echo "   COSMOS_USAGES_CONTAINER=${COSMOS_USAGES_CONTAINER}"
+        echo "   COSMOS_PLANS_CONTAINER=${COSMOS_PLANS_CONTAINER}"
+        echo "   COSMOS_PLAN_CHANGES_CONTAINER=${COSMOS_PLAN_CHANGES_CONTAINER}"
+        echo ""
+        echo "2. サンプルデータを投入:"
+        echo "   curl -X POST http://localhost:3000/api/admin/seed-electricity-data"
+        echo ""
+    windows:
+      shell: pwsh
+      run: |
+        Write-Host "================================================"
+        Write-Host "Cosmos DB がプロビジョニングされました"
+        Write-Host "================================================"
+        Write-Host ""
+        Write-Host "次のステップ:"
+        Write-Host "1. .env.local に以下の環境変数を設定してください:"
+        Write-Host ""
+        Write-Host "   COSMOS_ENDPOINT=$env:COSMOS_ENDPOINT"
+        Write-Host "   COSMOS_KEY=<Azure Portal から取得>"
+        Write-Host "   COSMOS_DB=$env:COSMOS_DB"
+        Write-Host "   COSMOS_CUSTOMERS_CONTAINER=$env:COSMOS_CUSTOMERS_CONTAINER"
+        Write-Host "   COSMOS_BILLINGS_CONTAINER=$env:COSMOS_BILLINGS_CONTAINER"
+        Write-Host "   COSMOS_USAGES_CONTAINER=$env:COSMOS_USAGES_CONTAINER"
+        Write-Host "   COSMOS_PLANS_CONTAINER=$env:COSMOS_PLANS_CONTAINER"
+        Write-Host "   COSMOS_PLAN_CHANGES_CONTAINER=$env:COSMOS_PLAN_CHANGES_CONTAINER"
+        Write-Host ""
+        Write-Host "2. サンプルデータを投入:"
+        Write-Host "   curl -X POST http://localhost:3000/api/admin/seed-electricity-data"
+        Write-Host ""

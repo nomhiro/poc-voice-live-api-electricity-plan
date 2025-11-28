@@ -1,0 +1,11 @@
+{
+  "projects": [
+    {
+      "id": "poc-voice-live-api-ai-agent",
+      "displayName": "poc-voice-live-api-ai-agent",
+      "path": ".",
+      "language": "javascript",
+      "framework": "nextjs"
+    }
+  ]
+}

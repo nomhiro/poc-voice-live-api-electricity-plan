@@ -9,6 +9,8 @@ export default function RealtimePage() {
   // Admin panel state
   const [seedStatus, setSeedStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [seedMessage, setSeedMessage] = useState('')
+  // 本人確認済み顧客情報（メール送信用）
+  const [verifiedCustomer, setVerifiedCustomer] = useState<{customerId: string, customerName: string, customerEmail: string} | null>(null)
 
   // Data initialization function
   async function handleSeedData() {
@@ -213,6 +215,15 @@ export default function RealtimePage() {
                   // Also add assistant-visible transcript to UI
                   const outText = (typeof fnBody === 'object') ? (JSON.stringify(fnBody, null, 2)) : String(fnBody)
                   setTranscripts(prev => [...prev, { id: 'assistant-fn-' + String(Date.now()), speaker: 'assistant', text: outText, partial: false }])
+
+                  // get_customer_info 成功時に顧客情報を保存（メール送信用）
+                  if (funcName === 'get_customer_info' && fnBody?.success && fnBody?.customer) {
+                    setVerifiedCustomer({
+                      customerId: fnBody.customer.customerId,
+                      customerName: fnBody.customer.customerName,
+                      customerEmail: fnBody.customer.email
+                    })
+                  }
                 } catch (e) {
                   console.error('Function execution failed', e)
                 }
@@ -330,6 +341,15 @@ export default function RealtimePage() {
 
                   const outText = (typeof fnBody === 'object') ? (JSON.stringify(fnBody, null, 2)) : String(fnBody)
                   setTranscripts(prev => [...prev, { id: 'assistant-fn-' + String(Date.now()), speaker: 'assistant', text: outText, partial: false }])
+
+                  // get_customer_info 成功時に顧客情報を保存（メール送信用）
+                  if (funcName === 'get_customer_info' && fnBody?.success && fnBody?.customer) {
+                    setVerifiedCustomer({
+                      customerId: fnBody.customer.customerId,
+                      customerName: fnBody.customer.customerName,
+                      customerEmail: fnBody.customer.email
+                    })
+                  }
                 } catch (e) {
                   console.error('Function execution failed', e)
                 }
@@ -426,12 +446,46 @@ export default function RealtimePage() {
   setStatus('connected')
   }
 
-  function stop() {
+  async function stop() {
     pcRef.current?.close()
     pcRef.current = null
     localStreamRef.current?.getTracks().forEach(t => t.stop())
     localStreamRef.current = null
     setStatus('stopped')
+
+    // 本人確認済みの場合、会話サマリーメールを送信
+    if (verifiedCustomer && transcripts.length > 0) {
+      try {
+        const filteredTranscript = transcripts
+          .filter(t => (t.speaker === 'user' || t.speaker === 'assistant') && !t.partial)
+          .map(t => ({ id: t.id, speaker: t.speaker, text: t.text }))
+
+        if (filteredTranscript.length > 0) {
+          const res = await fetch('/api/functions/send_conversation_email', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              customerId: verifiedCustomer.customerId,
+              customerEmail: verifiedCustomer.customerEmail,
+              customerName: verifiedCustomer.customerName,
+              transcript: filteredTranscript
+            })
+          })
+          const result = await res.json()
+          if (result.success) {
+            console.log('会話サマリーメールを送信しました:', result.sentTo || '(skipped)')
+          } else {
+            console.warn('会話サマリーメール送信失敗:', result.error)
+          }
+        }
+      } catch (e) {
+        console.error('会話サマリーメール送信エラー:', e)
+      }
+    }
+
+    // 状態をリセット
+    setVerifiedCustomer(null)
+    setTranscripts([])
   }
 
   return (

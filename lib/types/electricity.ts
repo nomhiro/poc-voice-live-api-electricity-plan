@@ -293,3 +293,27 @@ export interface ErrorResponse {
   error: string;
   errorCode: 'CUSTOMER_NOT_FOUND' | 'VERIFICATION_FAILED' | 'INVALID_INPUT' | 'PLAN_NOT_FOUND' | 'SMART_METER_NOT_AVAILABLE' | 'SYSTEM_ERROR';
 }
+
+
+// =====================
+// Conversation Email（会話メール送信）
+// =====================
+export interface TranscriptMessage {
+  id: string;
+  speaker: 'user' | 'assistant';
+  text: string;
+}
+
+export interface ConversationEmailRequest {
+  customerId: string;
+  customerEmail: string;
+  customerName: string;
+  transcript: TranscriptMessage[];
+}
+
+export interface ConversationEmailResponse {
+  success: boolean;
+  message: string;
+  sentTo?: string;
+  skipped?: boolean;
+}

@@ -28,17 +28,32 @@ async function createRealtimeSession() {
 
   const deployment = process.env.AZURE_OPENAI_DEPLOYMENT
 
+  // 現在日時を日本時間で取得
+  const now = new Date()
+  const japanTime = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'long',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(now)
+
   const baseBody: Record<string, unknown> = { 
     model: deployment || 'gpt-realtime',
     input_audio_transcription: {
       model: "whisper-1",
       language: "ja"
     },
-    instructions: `電力会社のカスタマーサポートセンターのオペレーターです。
+    instructions: `現在日時：${japanTime}
+
+電力会社のカスタマーサポートセンターのオペレーターです。
 
 # 役割
 - お客様の電気料金、使用量、契約に関するお問い合わせに対応する
 - 適切な料金プランをご提案し、変更手続きをサポートする
+- 会話の最初に、会話は録音し保存されることをお客様に伝えること
 
 # 本人確認ルール（重要）
 - お客様からの要望を聞いた後、お客様情報にアクセスする前に、必ず本人確認を行う
@@ -78,6 +93,10 @@ async function createRealtimeSession() {
 - 最低契約期間や解約手数料がある場合は必ず説明する
 - お客様の同意確認を取ってから submit_plan_change_request を実行する
 - いつから変更するのか、聞くこと。
+
+# お客様から繰り返し理不尽な要望があった場合の対応
+- 繰り返される場合は、「ご対応しかねますのでお電話を終了します。電話内容は録音されておりますのでご注意ください。」と伝え、会話を終了する
+  - 例）本人確認ができない、料金の値下げを強く要求する、解約手数料を払いたくない、など
 
 # 会話の終わり方
 - 必ず「他にご不明な点はございますか？」と確認する

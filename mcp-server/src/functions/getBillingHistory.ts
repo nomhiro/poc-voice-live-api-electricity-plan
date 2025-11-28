@@ -1,17 +1,20 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getCosmosClient } from '@/lib/cosmosClient';
-import { getBillingsForCustomer } from '@/lib/sampleData/electricity';
-import type { Billing, BillingHistoryResponse, ErrorResponse } from '@/lib/types/electricity';
+import { app, InvocationContext, arg } from '@azure/functions';
+import { getCosmosClient } from '../lib/cosmosClient';
+import { getBillingsForCustomer } from '../lib/sampleData';
+import type { Billing, BillingHistoryResponse, ErrorResponse } from '../lib/types';
 
-interface RequestBody {
-  customerId?: string;
-  months?: number;
-}
-
-export async function POST(request: NextRequest) {
+export async function getBillingHistory(
+  _toolArguments: unknown,
+  context: InvocationContext
+): Promise<string> {
   try {
-    const body: RequestBody = await request.json();
-    const { customerId, months = 6 } = body;
+    const args = (context.triggerMetadata?.mcptoolargs ?? {}) as {
+      customerId?: string;
+      months?: number;
+    };
+
+    const customerId = args?.customerId;
+    const months = args?.months ?? 6;
 
     if (!customerId) {
       const errorResponse: ErrorResponse = {
@@ -19,7 +22,7 @@ export async function POST(request: NextRequest) {
         error: 'お客様番号を入力してください。',
         errorCode: 'INVALID_INPUT'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     const monthsToFetch = Math.min(Math.max(months, 1), 24);
@@ -38,8 +41,8 @@ export async function POST(request: NextRequest) {
         });
 
         const { resources } = await container.items.query({
-          query: `SELECT * FROM c WHERE c.customerId = @customerId 
-                  ORDER BY c.billingPeriod.year DESC, c.billingPeriod.month DESC 
+          query: `SELECT * FROM c WHERE c.customerId = @customerId
+                  ORDER BY c.billingPeriod.year DESC, c.billingPeriod.month DESC
                   OFFSET 0 LIMIT @limit`,
           parameters: [
             { name: '@customerId', value: customerId },
@@ -49,8 +52,7 @@ export async function POST(request: NextRequest) {
 
         billings = resources as Billing[];
       } catch (error) {
-        console.error('Cosmos DB error:', error);
-        // Fall through to sample data
+        context.error('Cosmos DB error:', error);
       }
     }
 
@@ -65,7 +67,7 @@ export async function POST(request: NextRequest) {
         error: '請求履歴が見つかりませんでした。',
         errorCode: 'CUSTOMER_NOT_FOUND'
       };
-      return NextResponse.json(errorResponse, { status: 404 });
+      return JSON.stringify(errorResponse);
     }
 
     // Format billings for response
@@ -96,26 +98,24 @@ export async function POST(request: NextRequest) {
       }
     };
 
-    return NextResponse.json(response);
+    return JSON.stringify(response);
   } catch (error) {
-    console.error('Error in get_billing_history:', error);
+    context.error('Error in get_billing_history:', error);
     const errorResponse: ErrorResponse = {
       success: false,
       error: 'システムエラーが発生しました。しばらくしてからお試しください。',
       errorCode: 'SYSTEM_ERROR'
     };
-    return NextResponse.json(errorResponse, { status: 500 });
+    return JSON.stringify(errorResponse);
   }
 }
 
-export async function GET() {
-  return NextResponse.json({ 
-    endpoint: 'get_billing_history',
-    description: '過去の請求履歴を取得します。',
-    method: 'POST',
-    parameters: {
-      customerId: '顧客ID（必須）',
-      months: '取得する月数（1〜24、デフォルト6）'
-    }
-  });
-}
+app.mcpTool('getBillingHistory', {
+  toolName: 'get_billing_history',
+  description: '指定した顧客の過去の請求履歴（使用量と請求金額）を取得します。',
+  toolProperties: {
+    customerId: arg.string().describe('顧客ID（必須。例: C-001）'),
+    months: arg.number().describe('取得する月数（1〜24、デフォルト6）')
+  },
+  handler: getBillingHistory
+});

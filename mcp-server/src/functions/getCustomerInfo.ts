@@ -1,12 +1,7 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getCosmosClient } from '@/lib/cosmosClient';
-import { findCustomer } from '@/lib/sampleData/electricity';
-import type { Customer, CustomerInfoResponse, ErrorResponse } from '@/lib/types/electricity';
-
-interface RequestBody {
-  customerId?: string;
-  verificationName?: string;
-}
+import { app, InvocationContext, arg } from '@azure/functions';
+import { getCosmosClient } from '../lib/cosmosClient';
+import { findCustomer } from '../lib/sampleData';
+import type { Customer, CustomerInfoResponse, ErrorResponse } from '../lib/types';
 
 /**
  * ひらがなをカタカナに変換する
@@ -17,10 +12,18 @@ function toKatakana(str: string): string {
   );
 }
 
-export async function POST(request: NextRequest) {
+export async function getCustomerInfo(
+  _toolArguments: unknown,
+  context: InvocationContext
+): Promise<string> {
   try {
-    const body: RequestBody = await request.json();
-    const { customerId, verificationName } = body;
+    const args = (context.triggerMetadata?.mcptoolargs ?? {}) as {
+      customerId?: string;
+      verificationName?: string;
+    };
+
+    const customerId = args?.customerId;
+    const verificationName = args?.verificationName;
 
     if (!customerId) {
       const errorResponse: ErrorResponse = {
@@ -28,7 +31,7 @@ export async function POST(request: NextRequest) {
         error: 'お客様番号または電話番号下4桁を入力してください。',
         errorCode: 'INVALID_INPUT'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     if (!verificationName) {
@@ -37,7 +40,7 @@ export async function POST(request: NextRequest) {
         error: 'ご本人確認のため、ご契約者様のお名前をお教えください。',
         errorCode: 'INVALID_INPUT'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     let customer: Customer | undefined;
@@ -54,7 +57,6 @@ export async function POST(request: NextRequest) {
           partitionKey: { paths: ['/customerId'] }
         });
 
-        // Search by customerId or phoneLastFour
         const { resources } = await container.items.query({
           query: 'SELECT * FROM c WHERE c.customerId = @id OR c.phoneLastFour = @id',
           parameters: [{ name: '@id', value: customerId }]
@@ -64,8 +66,7 @@ export async function POST(request: NextRequest) {
           customer = resources[0] as Customer;
         }
       } catch (error) {
-        console.error('Cosmos DB error:', error);
-        // Fall through to sample data
+        context.error('Cosmos DB error:', error);
       }
     }
 
@@ -80,7 +81,7 @@ export async function POST(request: NextRequest) {
         error: 'お客様情報が見つかりませんでした。お客様番号をご確認ください。',
         errorCode: 'CUSTOMER_NOT_FOUND'
       };
-      return NextResponse.json(errorResponse, { status: 404 });
+      return JSON.stringify(errorResponse);
     }
 
     // Verify name - prioritize katakana matching for better voice recognition accuracy
@@ -103,7 +104,7 @@ export async function POST(request: NextRequest) {
         error: 'ご本人確認ができませんでした。ご契約者様のお名前をご確認ください。',
         errorCode: 'VERIFICATION_FAILED'
       };
-      return NextResponse.json(errorResponse, { status: 401 });
+      return JSON.stringify(errorResponse);
     }
 
     // Mask phone number
@@ -147,26 +148,24 @@ export async function POST(request: NextRequest) {
       }
     };
 
-    return NextResponse.json(response);
+    return JSON.stringify(response);
   } catch (error) {
-    console.error('Error in get_customer_info:', error);
+    context.error('Error in get_customer_info:', error);
     const errorResponse: ErrorResponse = {
       success: false,
       error: 'システムエラーが発生しました。しばらくしてからお試しください。',
       errorCode: 'SYSTEM_ERROR'
     };
-    return NextResponse.json(errorResponse, { status: 500 });
+    return JSON.stringify(errorResponse);
   }
 }
 
-export async function GET() {
-  return NextResponse.json({ 
-    endpoint: 'get_customer_info',
-    description: '顧客IDまたは電話番号下4桁と契約者名で本人確認し、契約情報を取得します。',
-    method: 'POST',
-    parameters: {
-      customerId: '顧客ID（例: C-001）または電話番号下4桁（例: 5678）',
-      verificationName: '契約者名（漢字またはカナ）'
-    }
-  });
-}
+app.mcpTool('getCustomerInfo', {
+  toolName: 'get_customer_info',
+  description: '顧客IDまたは電話番号下4桁と契約者名で本人確認し、契約情報を取得します。',
+  toolProperties: {
+    customerId: arg.string().describe('顧客ID（例: C-001）または電話番号下4桁（例: 5678）'),
+    verificationName: arg.string().describe('本人確認用のご契約者様のお名前（漢字またはカタカナ）')
+  },
+  handler: getCustomerInfo
+});

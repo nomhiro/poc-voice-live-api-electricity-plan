@@ -1,12 +1,7 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getCosmosClient } from '@/lib/cosmosClient';
-import { findCustomer, getBillingsForCustomer, getPlanById } from '@/lib/sampleData/electricity';
-import type { ElectricityPlan, Billing, SimulationResponse, ErrorResponse } from '@/lib/types/electricity';
-
-interface RequestBody {
-  customerId?: string;
-  newPlanId?: string;
-}
+import { app, InvocationContext, arg } from '@azure/functions';
+import { getCosmosClient } from '../lib/cosmosClient';
+import { findCustomer, getBillingsForCustomer, getPlanById } from '../lib/sampleData';
+import type { ElectricityPlan, Billing, SimulationResponse, ErrorResponse } from '../lib/types';
 
 // Calculate charge for a given usage and plan
 function calculateCharge(usageKwh: number, plan: ElectricityPlan, amperage: number): number {
@@ -16,8 +11,8 @@ function calculateCharge(usageKwh: number, plan: ElectricityPlan, amperage: numb
 
   // Calculate tiered usage charges
   const tier1Kwh = Math.min(usageKwh, plan.pricing.unitPrices.tier1.upToKwh);
-  const tier2Kwh = Math.min(Math.max(usageKwh - plan.pricing.unitPrices.tier1.upToKwh, 0), 
-                           plan.pricing.unitPrices.tier2.upToKwh - plan.pricing.unitPrices.tier1.upToKwh);
+  const tier2Kwh = Math.min(Math.max(usageKwh - plan.pricing.unitPrices.tier1.upToKwh, 0),
+    plan.pricing.unitPrices.tier2.upToKwh - plan.pricing.unitPrices.tier1.upToKwh);
   const tier3Kwh = Math.max(usageKwh - (plan.pricing.unitPrices.tier2.upToKwh || 300), 0);
 
   const tier1Charge = tier1Kwh * plan.pricing.unitPrices.tier1.pricePerKwh;
@@ -34,10 +29,18 @@ function calculateCharge(usageKwh: number, plan: ElectricityPlan, amperage: numb
   return Math.round(subtotal + tax);
 }
 
-export async function POST(request: NextRequest) {
+export async function simulatePlanChange(
+  _toolArguments: unknown,
+  context: InvocationContext
+): Promise<string> {
   try {
-    const body: RequestBody = await request.json();
-    const { customerId, newPlanId } = body;
+    const args = (context.triggerMetadata?.mcptoolargs ?? {}) as {
+      customerId?: string;
+      newPlanId?: string;
+    };
+
+    const customerId = args?.customerId;
+    const newPlanId = args?.newPlanId;
 
     if (!customerId) {
       const errorResponse: ErrorResponse = {
@@ -45,7 +48,7 @@ export async function POST(request: NextRequest) {
         error: 'お客様番号を入力してください。',
         errorCode: 'INVALID_INPUT'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     if (!newPlanId) {
@@ -54,7 +57,7 @@ export async function POST(request: NextRequest) {
         error: '変更先のプランIDを指定してください。',
         errorCode: 'INVALID_INPUT'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     // Get customer info
@@ -65,7 +68,7 @@ export async function POST(request: NextRequest) {
         error: 'お客様情報が見つかりませんでした。',
         errorCode: 'CUSTOMER_NOT_FOUND'
       };
-      return NextResponse.json(errorResponse, { status: 404 });
+      return JSON.stringify(errorResponse);
     }
 
     // Get current and new plan
@@ -101,7 +104,7 @@ export async function POST(request: NextRequest) {
           newPlan = newPlanResources[0] as ElectricityPlan;
         }
       } catch (error) {
-        console.error('Cosmos DB error:', error);
+        context.error('Cosmos DB error:', error);
       }
     }
 
@@ -119,7 +122,7 @@ export async function POST(request: NextRequest) {
         error: '現在のプラン情報が見つかりませんでした。',
         errorCode: 'PLAN_NOT_FOUND'
       };
-      return NextResponse.json(errorResponse, { status: 404 });
+      return JSON.stringify(errorResponse);
     }
 
     if (!newPlan) {
@@ -128,7 +131,7 @@ export async function POST(request: NextRequest) {
         error: '指定されたプランが見つかりませんでした。',
         errorCode: 'PLAN_NOT_FOUND'
       };
-      return NextResponse.json(errorResponse, { status: 404 });
+      return JSON.stringify(errorResponse);
     }
 
     if (!newPlan.isAvailable) {
@@ -137,7 +140,7 @@ export async function POST(request: NextRequest) {
         error: '指定されたプランは現在お申込みいただけません。',
         errorCode: 'PLAN_NOT_FOUND'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     // Get billing history for simulation
@@ -153,15 +156,15 @@ export async function POST(request: NextRequest) {
         });
 
         const { resources } = await container.items.query({
-          query: `SELECT * FROM c WHERE c.customerId = @customerId 
-                  ORDER BY c.billingPeriod.year DESC, c.billingPeriod.month DESC 
+          query: `SELECT * FROM c WHERE c.customerId = @customerId
+                  ORDER BY c.billingPeriod.year DESC, c.billingPeriod.month DESC
                   OFFSET 0 LIMIT 12`,
           parameters: [{ name: '@customerId', value: customerId }]
         }).fetchAll();
 
         billings = resources as Billing[];
       } catch (error) {
-        console.error('Cosmos DB error:', error);
+        context.error('Cosmos DB error:', error);
       }
     }
 
@@ -175,7 +178,7 @@ export async function POST(request: NextRequest) {
         error: '過去の使用量データがないためシミュレーションができません。',
         errorCode: 'CUSTOMER_NOT_FOUND'
       };
-      return NextResponse.json(errorResponse, { status: 404 });
+      return JSON.stringify(errorResponse);
     }
 
     const amperage = customer.contract.contractedAmperage;
@@ -237,26 +240,24 @@ export async function POST(request: NextRequest) {
       notes
     };
 
-    return NextResponse.json(response);
+    return JSON.stringify(response);
   } catch (error) {
-    console.error('Error in simulate_plan_change:', error);
+    context.error('Error in simulate_plan_change:', error);
     const errorResponse: ErrorResponse = {
       success: false,
       error: 'システムエラーが発生しました。しばらくしてからお試しください。',
       errorCode: 'SYSTEM_ERROR'
     };
-    return NextResponse.json(errorResponse, { status: 500 });
+    return JSON.stringify(errorResponse);
   }
 }
 
-export async function GET() {
-  return NextResponse.json({ 
-    endpoint: 'simulate_plan_change',
-    description: 'プラン変更した場合の月額料金をシミュレーションします。',
-    method: 'POST',
-    parameters: {
-      customerId: '顧客ID（必須）',
-      newPlanId: '変更先のプランID（必須）'
-    }
-  });
-}
+app.mcpTool('simulatePlanChange', {
+  toolName: 'simulate_plan_change',
+  description: 'プラン変更した場合の月額料金をシミュレーションし、現在のプランとの差額を計算します。',
+  toolProperties: {
+    customerId: arg.string().describe('顧客ID（必須。例: C-001）'),
+    newPlanId: arg.string().describe('変更先のプランID（必須。例: plan-family-value）')
+  },
+  handler: simulatePlanChange
+});

@@ -1,0 +1,25 @@
+# Azure Functions artifacts
+bin
+obj
+appsettings.json
+local.settings.json
+
+# Node modules
+node_modules/
+
+# TypeScript
+dist/
+
+# Local settings
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -82,116 +82,14 @@ async function createRealtimeSession() {
 # 会話の終わり方
 - 必ず「他にご不明な点はございますか？」と確認する
 - 終話時は「お電話ありがとうございました」で締める`,
+    // MCP Server Configuration
+    // Azure OpenAI Realtime APIがMCPサーバーに直接接続し、tools/listでツール一覧を自動取得
     tools: [
       {
-        type: 'function',
-        name: 'get_customer_info',
-        description: '顧客IDまたは電話番号下4桁と契約者名で本人確認し、契約情報を取得します。【重要】verificationName は必ずカタカナで指定してください。',
-        parameters: {
-          type: 'object',
-          properties: {
-            customerId: {
-              type: 'string',
-              description: '顧客ID（例: C-001）または電話番号下4桁（例: 5678）'
-            },
-            verificationName: {
-              type: 'string',
-              description: '本人確認用のお客様のお名前。【必須】カタカナで指定すること（例: ノムラヒロキ）'
-            }
-          },
-          required: ['customerId', 'verificationName']
-        }
-      },
-      {
-        type: 'function',
-        name: 'get_billing_history',
-        description: '過去の請求履歴を取得します。期間を指定しない場合は直近6ヶ月分を返します',
-        parameters: {
-          type: 'object',
-          properties: {
-            customerId: { 
-              type: 'string', 
-              description: '顧客ID' 
-            },
-            months: { 
-              type: 'number', 
-              description: '取得する月数（1〜24、デフォルト6）' 
-            }
-          },
-          required: ['customerId']
-        }
-      },
-      {
-        type: 'function',
-        name: 'get_current_usage',
-        description: '今月の電力使用量をリアルタイムで取得します。スマートメーター対応のお客様のみ利用可能です',
-        parameters: {
-          type: 'object',
-          properties: {
-            customerId: { 
-              type: 'string', 
-              description: '顧客ID' 
-            }
-          },
-          required: ['customerId']
-        }
-      },
-      {
-        type: 'function',
-        name: 'list_available_plans',
-        description: '契約可能な電力プランの一覧を取得します',
-        parameters: {
-          type: 'object',
-          properties: {
-            customerId: { 
-              type: 'string', 
-              description: '顧客ID（指定時は現在の契約に基づいた推奨プランも含む）' 
-            }
-          },
-          required: []
-        }
-      },
-      {
-        type: 'function',
-        name: 'simulate_plan_change',
-        description: 'プラン変更した場合の月額料金をシミュレーションします。過去の使用実績に基づいて試算します',
-        parameters: {
-          type: 'object',
-          properties: {
-            customerId: { 
-              type: 'string', 
-              description: '顧客ID' 
-            },
-            newPlanId: { 
-              type: 'string', 
-              description: '変更先のプランID' 
-            }
-          },
-          required: ['customerId', 'newPlanId']
-        }
-      },
-      {
-        type: 'function',
-        name: 'submit_plan_change_request',
-        description: '料金プランの変更申請を行います。変更は翌月の検針日から適用されます',
-        parameters: {
-          type: 'object',
-          properties: {
-            customerId: { 
-              type: 'string', 
-              description: '顧客ID' 
-            },
-            newPlanId: { 
-              type: 'string', 
-              description: '変更先のプランID' 
-            },
-            customerConfirmation: { 
-              type: 'boolean', 
-              description: 'お客様が変更内容に同意したことの確認（必須: true）' 
-            }
-          },
-          required: ['customerId', 'newPlanId', 'customerConfirmation']
-        }
+        type: 'mcp',
+        server_label: 'electricity-support',
+        server_url: process.env.MCP_SERVER_URL || 'http://localhost:7071/runtime/webhooks/mcp',
+        require_approval: 'never'
       }
     ]
   }

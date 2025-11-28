@@ -2,3 +2,8 @@ node_modules/
 .next/
 dist/
 .env.local
+
+# azurite
+__azurite_db_queue*
+__azurite_db_table*
+__azurite_db_blob*

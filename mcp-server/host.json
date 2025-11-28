@@ -1,0 +1,22 @@
+{
+  "version": "2.0",
+  "logging": {
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": true,
+        "excludedTypes": "Request"
+      }
+    }
+  },
+  "extensionBundle": {
+    "id": "Microsoft.Azure.Functions.ExtensionBundle",
+    "version": "[4.0.0, 5.0.0)"
+  },
+  "extensions": {
+    "mcp": {
+      "serverName": "electricity-support-mcp",
+      "serverVersion": "1.0.0",
+      "instructions": "電力会社カスタマーサポート用MCPサーバー。顧客情報の取得、請求履歴の照会、料金プランの変更などを行います。"
+    }
+  }
+}

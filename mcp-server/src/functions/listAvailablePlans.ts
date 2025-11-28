@@ -1,16 +1,18 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getCosmosClient } from '@/lib/cosmosClient';
-import { getAvailablePlans, findCustomer, getBillingsForCustomer } from '@/lib/sampleData/electricity';
-import type { ElectricityPlan, AvailablePlansResponse, ErrorResponse } from '@/lib/types/electricity';
+import { app, InvocationContext, arg } from '@azure/functions';
+import { getCosmosClient } from '../lib/cosmosClient';
+import { getAvailablePlans, findCustomer, getBillingsForCustomer } from '../lib/sampleData';
+import type { ElectricityPlan, AvailablePlansResponse, ErrorResponse } from '../lib/types';
 
-interface RequestBody {
-  customerId?: string;
-}
-
-export async function POST(request: NextRequest) {
+export async function listAvailablePlans(
+  _toolArguments: unknown,
+  context: InvocationContext
+): Promise<string> {
   try {
-    const body: RequestBody = await request.json();
-    const { customerId } = body;
+    const args = (context.triggerMetadata?.mcptoolargs ?? {}) as {
+      customerId?: string;
+    };
+
+    const customerId = args?.customerId;
 
     let plans: ElectricityPlan[] = [];
     let currentPlanId: string | undefined;
@@ -21,7 +23,7 @@ export async function POST(request: NextRequest) {
       const customer = findCustomer(customerId);
       if (customer) {
         currentPlanId = customer.contract.planId;
-        
+
         // Calculate average usage for recommendations
         const billings = getBillingsForCustomer(customerId, 6);
         if (billings.length > 0) {
@@ -50,7 +52,7 @@ export async function POST(request: NextRequest) {
 
         plans = resources as ElectricityPlan[];
       } catch (error) {
-        console.error('Cosmos DB error:', error);
+        context.error('Cosmos DB error:', error);
       }
     }
 
@@ -64,12 +66,10 @@ export async function POST(request: NextRequest) {
       // Determine if plan is recommended based on usage
       let isRecommended = false;
       if (currentPlanId && plan.id !== currentPlanId) {
-        // Recommend smart-eco for high night usage (we don't have that data, so skip)
         // Recommend family-value for high usage (>300kWh average)
         if (plan.id === 'plan-family-value' && averageUsage > 300) {
           isRecommended = true;
         }
-        // Recommend green-plus for environmentally conscious (can't determine, skip)
       }
 
       return {
@@ -97,25 +97,23 @@ export async function POST(request: NextRequest) {
       plans: formattedPlans
     };
 
-    return NextResponse.json(response);
+    return JSON.stringify(response);
   } catch (error) {
-    console.error('Error in list_available_plans:', error);
+    context.error('Error in list_available_plans:', error);
     const errorResponse: ErrorResponse = {
       success: false,
       error: 'システムエラーが発生しました。しばらくしてからお試しください。',
       errorCode: 'SYSTEM_ERROR'
     };
-    return NextResponse.json(errorResponse, { status: 500 });
+    return JSON.stringify(errorResponse);
   }
 }
 
-export async function GET() {
-  return NextResponse.json({ 
-    endpoint: 'list_available_plans',
-    description: '契約可能な電力プランの一覧を取得します。',
-    method: 'POST',
-    parameters: {
-      customerId: '顧客ID（省略可。指定時は現在の契約に基づいた推奨プランも含む）'
-    }
-  });
-}
+app.mcpTool('listAvailablePlans', {
+  toolName: 'list_available_plans',
+  description: '契約可能な電力プランの一覧を取得します。顧客IDを指定すると、現在の契約に基づいた推奨プランも表示されます。',
+  toolProperties: {
+    customerId: arg.string().describe('顧客ID（省略可。例: C-001。指定時は現在の契約に基づいた推奨プランも含む）')
+  },
+  handler: listAvailablePlans
+});

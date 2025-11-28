@@ -1,16 +1,18 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getCosmosClient } from '@/lib/cosmosClient';
-import { getCurrentUsageForCustomer, findCustomer, getBillingsForCustomer } from '@/lib/sampleData/electricity';
-import type { CurrentMonthUsage, CurrentUsageResponse, ErrorResponse } from '@/lib/types/electricity';
+import { app, InvocationContext, arg } from '@azure/functions';
+import { getCosmosClient } from '../lib/cosmosClient';
+import { getCurrentUsageForCustomer, findCustomer, getBillingsForCustomer } from '../lib/sampleData';
+import type { CurrentMonthUsage, CurrentUsageResponse, ErrorResponse } from '../lib/types';
 
-interface RequestBody {
-  customerId?: string;
-}
-
-export async function POST(request: NextRequest) {
+export async function getCurrentUsage(
+  _toolArguments: unknown,
+  context: InvocationContext
+): Promise<string> {
   try {
-    const body: RequestBody = await request.json();
-    const { customerId } = body;
+    const args = (context.triggerMetadata?.mcptoolargs ?? {}) as {
+      customerId?: string;
+    };
+
+    const customerId = args?.customerId;
 
     if (!customerId) {
       const errorResponse: ErrorResponse = {
@@ -18,13 +20,13 @@ export async function POST(request: NextRequest) {
         error: 'お客様番号を入力してください。',
         errorCode: 'INVALID_INPUT'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     // Check if customer has smart meter
     let hasSmart = false;
     const cosmos = getCosmosClient();
-    
+
     if (cosmos) {
       try {
         const dbName = process.env.COSMOS_DB || 'electricity-support-db';
@@ -44,7 +46,7 @@ export async function POST(request: NextRequest) {
           hasSmart = resources[0].meterType === 'smart';
         }
       } catch (error) {
-        console.error('Cosmos DB error checking meter type:', error);
+        context.error('Cosmos DB error checking meter type:', error);
       }
     }
 
@@ -59,7 +61,7 @@ export async function POST(request: NextRequest) {
           error: 'お客様情報が見つかりませんでした。',
           errorCode: 'CUSTOMER_NOT_FOUND'
         };
-        return NextResponse.json(errorResponse, { status: 404 });
+        return JSON.stringify(errorResponse);
       }
     }
 
@@ -69,7 +71,7 @@ export async function POST(request: NextRequest) {
         error: 'スマートメーターが設置されていないため、リアルタイムの使用量は確認できません。次回の検針日以降に請求書でご確認ください。',
         errorCode: 'SMART_METER_NOT_AVAILABLE'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     let currentUsage: CurrentMonthUsage | undefined;
@@ -101,7 +103,7 @@ export async function POST(request: NextRequest) {
           currentUsage = resources[0] as CurrentMonthUsage;
         }
       } catch (error) {
-        console.error('Cosmos DB error:', error);
+        context.error('Cosmos DB error:', error);
       }
     }
 
@@ -116,7 +118,7 @@ export async function POST(request: NextRequest) {
         error: '今月の使用量データがまだありません。',
         errorCode: 'CUSTOMER_NOT_FOUND'
       };
-      return NextResponse.json(errorResponse, { status: 404 });
+      return JSON.stringify(errorResponse);
     }
 
     // Get last month's usage for comparison
@@ -169,25 +171,23 @@ export async function POST(request: NextRequest) {
       lastUpdated: currentUsage.lastUpdated
     };
 
-    return NextResponse.json(response);
+    return JSON.stringify(response);
   } catch (error) {
-    console.error('Error in get_current_usage:', error);
+    context.error('Error in get_current_usage:', error);
     const errorResponse: ErrorResponse = {
       success: false,
       error: 'システムエラーが発生しました。しばらくしてからお試しください。',
       errorCode: 'SYSTEM_ERROR'
     };
-    return NextResponse.json(errorResponse, { status: 500 });
+    return JSON.stringify(errorResponse);
   }
 }
 
-export async function GET() {
-  return NextResponse.json({ 
-    endpoint: 'get_current_usage',
-    description: '今月の電力使用量をリアルタイムで取得します（スマートメーター対応のお客様のみ）。',
-    method: 'POST',
-    parameters: {
-      customerId: '顧客ID（必須）'
-    }
-  });
-}
+app.mcpTool('getCurrentUsage', {
+  toolName: 'get_current_usage',
+  description: '今月の電力使用量をリアルタイムで取得します（スマートメーター対応のお客様のみ利用可能）。',
+  toolProperties: {
+    customerId: arg.string().describe('顧客ID（必須。例: C-001）')
+  },
+  handler: getCurrentUsage
+});

@@ -1,19 +1,23 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getCosmosClient } from '@/lib/cosmosClient';
-import { findCustomer, getPlanById, addPlanChangeRequest } from '@/lib/sampleData/electricity';
-import { sendPlanChangeNotification } from '@/lib/emailClient';
-import type { PlanChangeRequest, ElectricityPlan, PlanChangeSubmitResponse, ErrorResponse } from '@/lib/types/electricity';
+import { app, InvocationContext, arg } from '@azure/functions';
+import { getCosmosClient } from '../lib/cosmosClient';
+import { findCustomer, getPlanById, addPlanChangeRequest } from '../lib/sampleData';
+import { sendPlanChangeNotification } from '../lib/emailClient';
+import type { PlanChangeRequest, ElectricityPlan, PlanChangeSubmitResponse, ErrorResponse } from '../lib/types';
 
-interface RequestBody {
-  customerId?: string;
-  newPlanId?: string;
-  customerConfirmation?: boolean;
-}
-
-export async function POST(request: NextRequest) {
+export async function submitPlanChangeRequest(
+  _toolArguments: unknown,
+  context: InvocationContext
+): Promise<string> {
   try {
-    const body: RequestBody = await request.json();
-    const { customerId, newPlanId, customerConfirmation } = body;
+    const args = (context.triggerMetadata?.mcptoolargs ?? {}) as {
+      customerId?: string;
+      newPlanId?: string;
+      customerConfirmation?: boolean;
+    };
+
+    const customerId = args?.customerId;
+    const newPlanId = args?.newPlanId;
+    const customerConfirmation = args?.customerConfirmation;
 
     if (!customerId) {
       const errorResponse: ErrorResponse = {
@@ -21,7 +25,7 @@ export async function POST(request: NextRequest) {
         error: 'お客様番号を入力してください。',
         errorCode: 'INVALID_INPUT'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     if (!newPlanId) {
@@ -30,7 +34,7 @@ export async function POST(request: NextRequest) {
         error: '変更先のプランIDを指定してください。',
         errorCode: 'INVALID_INPUT'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     if (!customerConfirmation) {
@@ -39,7 +43,7 @@ export async function POST(request: NextRequest) {
         error: 'プラン変更にはお客様の同意確認が必要です。変更内容をご確認の上、同意いただけますか？',
         errorCode: 'INVALID_INPUT'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     // Get customer info
@@ -50,13 +54,13 @@ export async function POST(request: NextRequest) {
         error: 'お客様情報が見つかりませんでした。',
         errorCode: 'CUSTOMER_NOT_FOUND'
       };
-      return NextResponse.json(errorResponse, { status: 404 });
+      return JSON.stringify(errorResponse);
     }
 
     // Get new plan
     let newPlan: ElectricityPlan | undefined;
     const cosmos = getCosmosClient();
-    
+
     if (cosmos) {
       try {
         const dbName = process.env.COSMOS_DB || 'electricity-support-db';
@@ -76,7 +80,7 @@ export async function POST(request: NextRequest) {
           newPlan = resources[0] as ElectricityPlan;
         }
       } catch (error) {
-        console.error('Cosmos DB error:', error);
+        context.error('Cosmos DB error:', error);
       }
     }
 
@@ -90,7 +94,7 @@ export async function POST(request: NextRequest) {
         error: '指定されたプランが見つかりませんでした。',
         errorCode: 'PLAN_NOT_FOUND'
       };
-      return NextResponse.json(errorResponse, { status: 404 });
+      return JSON.stringify(errorResponse);
     }
 
     if (!newPlan.isAvailable) {
@@ -99,7 +103,7 @@ export async function POST(request: NextRequest) {
         error: '指定されたプランは現在お申込みいただけません。',
         errorCode: 'PLAN_NOT_FOUND'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     // Check if already on this plan
@@ -109,7 +113,7 @@ export async function POST(request: NextRequest) {
         error: 'すでにこのプランをご契約中です。',
         errorCode: 'INVALID_INPUT'
       };
-      return NextResponse.json(errorResponse, { status: 400 });
+      return JSON.stringify(errorResponse);
     }
 
     // Calculate effective date (next month's billing cycle)
@@ -151,7 +155,7 @@ export async function POST(request: NextRequest) {
 
         await container.items.create(planChangeRequest);
       } catch (error) {
-        console.error('Cosmos DB error:', error);
+        context.error('Cosmos DB error:', error);
         // Fallback to in-memory
         addPlanChangeRequest(planChangeRequest);
       }
@@ -187,33 +191,31 @@ export async function POST(request: NextRequest) {
       nextSteps: [
         '確認のメールをお送りしますので、ご確認ください。',
         '変更内容に誤りがある場合は、お電話にてお問い合わせください。',
-        newPlan.minimumContractPeriod 
+        newPlan.minimumContractPeriod
           ? `なお、${newPlan.planName}には${newPlan.minimumContractPeriod}ヶ月の最低契約期間がございます。`
           : ''
       ].filter(Boolean)
     };
 
-    return NextResponse.json(response);
+    return JSON.stringify(response);
   } catch (error) {
-    console.error('Error in submit_plan_change_request:', error);
+    context.error('Error in submit_plan_change_request:', error);
     const errorResponse: ErrorResponse = {
       success: false,
       error: 'システムエラーが発生しました。しばらくしてからお試しください。',
       errorCode: 'SYSTEM_ERROR'
     };
-    return NextResponse.json(errorResponse, { status: 500 });
+    return JSON.stringify(errorResponse);
   }
 }
 
-export async function GET() {
-  return NextResponse.json({ 
-    endpoint: 'submit_plan_change_request',
-    description: '料金プランの変更申請を行います。',
-    method: 'POST',
-    parameters: {
-      customerId: '顧客ID（必須）',
-      newPlanId: '変更先のプランID（必須）',
-      customerConfirmation: 'お客様の同意確認（必須: true）'
-    }
-  });
-}
+app.mcpTool('submitPlanChangeRequest', {
+  toolName: 'submit_plan_change_request',
+  description: '料金プランの変更申請を行います。申請前にお客様の同意確認が必要です。',
+  toolProperties: {
+    customerId: arg.string().describe('顧客ID（必須。例: C-001）'),
+    newPlanId: arg.string().describe('変更先のプランID（必須。例: plan-family-value）'),
+    customerConfirmation: arg.boolean().describe('お客様の同意確認（必須: true）')
+  },
+  handler: submitPlanChangeRequest
+});

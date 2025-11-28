@@ -2,10 +2,17 @@
 
 import { useEffect, useRef, useState } from 'react'
 
+/**
+ * Realtime Audio Page (WebRTC) - MCP Server Version
+ *
+ * This version uses Azure Functions MCP Server for tool execution.
+ * Azure OpenAI Realtime API connects directly to the MCP server,
+ * so no function call handling is needed in the frontend.
+ */
 export default function RealtimePage() {
   const [status, setStatus] = useState('idle')
-  // transcripts now include speaker: 'user' | 'assistant', and partial flag
-  const [transcripts, setTranscripts] = useState<Array<{id:string, speaker:'user'|'assistant'|'tool', text:string, partial?:boolean}>>([])
+  // transcripts include speaker: 'user' | 'assistant', and partial flag
+  const [transcripts, setTranscripts] = useState<Array<{id:string, speaker:'user'|'assistant', text:string, partial?:boolean}>>([])
   // Admin panel state
   const [seedStatus, setSeedStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [seedMessage, setSeedMessage] = useState('')
@@ -27,43 +34,16 @@ export default function RealtimePage() {
         setSeedStatus('error')
         setSeedMessage(`✗ エラー: ${data.error || '不明なエラー'}`)
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       setSeedStatus('error')
-      setSeedMessage(`✗ エラー: ${e?.message || String(e)}`)
+      setSeedMessage(`✗ エラー: ${e instanceof Error ? e.message : String(e)}`)
     }
   }
+
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
-  const dcRef = useRef<any>(null)
+  const dcRef = useRef<RTCDataChannel | null>(null)
   const chatContainerRef = useRef<HTMLDivElement | null>(null)
-  const recognitionRef = useRef<any>(null)
-
-  // Utility: small sleep
-  function sleep(ms: number) {
-    return new Promise((res) => setTimeout(res, ms))
-  }
-
-  // Safely send a JSON message on a RTCDataChannel, reject if channel not open
-  async function safeSend(channel: RTCDataChannel | null, obj: any) {
-    if (!channel) throw new Error('data channel missing')
-    // Wait up to timeout for the channel to become open
-    const timeoutMs = 1000
-    const start = Date.now()
-    while (true) {
-      const ready = (channel as any).readyState
-      if (ready === 'open' || ready === 1) break
-      if (Date.now() - start > timeoutMs) throw new Error('data channel not open (timeout)')
-      await sleep(100)
-    }
-    // send and let caller catch
-    try {
-      const json = JSON.stringify(obj)
-      channel.send(json)
-    } catch (err) {
-      console.error('safeSend failed to stringify/send object', { err, objSnippet: String(obj?.type || typeof obj) })
-      throw err
-    }
-  }
 
   // autoscroll to bottom when transcripts update
   useEffect(() => {
@@ -95,6 +75,58 @@ export default function RealtimePage() {
     })
   }
 
+  // Process incoming data channel messages (transcripts only, no function calls)
+  function handleDataChannelMessage(payload: Record<string, unknown>) {
+    // Prefer explicit transcripts in payload.content if available
+    let text: string | null = extractTranscriptFromPayload(payload) || extractTextFromEvent(payload)
+
+    // Sanitize: if extracted text looks like an event name or a single token, ignore it
+    const maybeName = payload?.name || payload?.type || payload?.event || payload?.topic || null
+    if (text && typeof text === 'string') {
+      const trimmed = text.trim()
+      if (typeof maybeName === 'string' && trimmed === maybeName.trim()) text = null
+      else if (typeof payload?.type === 'string' && trimmed === payload.type) text = null
+      else if (/^[\w.-]+$/.test(trimmed)) text = null
+    }
+
+    const name = payload?.name || payload?.type || payload?.event || payload?.topic || null
+    const isUserDelta = typeof name === 'string' && /conversation\.item\.(?:input_)?audio_transcription\.delta/i.test(name)
+    const isUserCompleted = typeof name === 'string' && /conversation\.item\.(?:input_)?audio_transcription\.completed/i.test(name)
+    const isResponseDone = typeof name === 'string' && /response\.done|response\.output_item\.done|response\.content_part|response\.content_part\.done/i.test(name)
+
+    // Handle response.done - extract transcripts from content array
+    if (isResponseDone) {
+      const contents = Array.isArray(payload?.content) ? payload.content : []
+      const joined = (contents as Array<Record<string, unknown>>)
+        .map((c) => (typeof c?.transcript === 'string' ? c.transcript : extractTextFromEvent(c) || ''))
+        .filter(Boolean)
+        .join('\n')
+      if (joined) {
+        setTranscripts(prev => [...prev, { id: 'assistant-done-' + String(Date.now()), speaker: 'assistant', text: joined, partial: false }])
+      }
+      return
+    }
+
+    // Handle user transcription events
+    if (isUserDelta || isUserCompleted) {
+      const itemId = (payload?.item_id || payload?.id || `user-${Date.now()}`) as string
+      const userText = extractTextFromEvent(payload) || ''
+      if (userText) {
+        const isFinal = isUserCompleted || (!!payload?.is_final) || (!!payload?.final)
+        upsertTranscript('user', String(itemId), userText, isFinal)
+      }
+      return
+    }
+
+    // Handle other transcript events
+    const speaker: 'user' | 'assistant' = 'assistant'
+    if (text) {
+      const isFinal = (!!payload?.is_final) || (!!payload?.final) || (!!payload?.committed)
+      const id = payload?.transcript_id || payload?.id || (speaker + '-' + String(payload?.sequence || Date.now()))
+      upsertTranscript(speaker, String(id), text, isFinal)
+    }
+  }
+
   async function start() {
     setStatus('getting-mic')
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -107,157 +139,30 @@ export default function RealtimePage() {
     // Add local audio track
     for (const track of stream.getAudioTracks()) pc.addTrack(track, stream)
 
-    // Create data channel for receiving events (transcripts, events)
-    let dc: RTCDataChannel | null = null
+    // Create data channel for receiving events (transcripts)
     try {
-      dc = pc.createDataChannel('oai-events')
+      const dc = pc.createDataChannel('oai-events')
       dcRef.current = dc
       dc.onopen = () => console.log('data channel open')
       dc.onclose = () => console.log('data channel closed')
       dc.onerror = (ev) => console.error('data channel error', ev)
-  dc.onmessage = async (ev) => {
-        // Try parse JSON, otherwise show raw text
-        let payload: any = null
+      dc.onmessage = (ev) => {
+        let payload: Record<string, unknown> = {}
         try {
           const parsed = JSON.parse(ev.data)
-          // If the server sends an array of events, pick the most relevant element
           if (Array.isArray(parsed)) {
-            payload = parsed.find((p: any) => p && (p.content || p.transcript || p.name || p.type)) || parsed[0]
+            payload = parsed.find((p: Record<string, unknown>) => p && (p.content || p.transcript || p.name || p.type)) || parsed[0] || {}
           } else {
             payload = parsed
           }
         } catch (_) {
           payload = { text: String(ev.data) }
         }
-        // Prefer explicit transcripts in payload.content if available
-        let text: string | null = extractTranscriptFromPayload(payload) || extractTextFromEvent(payload)
-
-        // Sanitize: if extracted text looks like an event name or a single token (no spaces, only word/dot/hyphen), ignore it
-        const maybeName = payload?.name || payload?.type || payload?.event || payload?.topic || null
-        if (text && typeof text === 'string') {
-          const trimmed = text.trim()
-          if (typeof maybeName === 'string' && trimmed === maybeName.trim()) text = null
-          else if (typeof payload?.type === 'string' && trimmed === payload.type) text = null
-          else if (/^[\w.-]+$/.test(trimmed)) text = null
-        }
-
-        // New: handle conversation.item.input_audio_transcription.delta and completed explicitly
-        const name = payload?.name || payload?.type || payload?.event || payload?.topic || null
-        const isUserDelta = typeof name === 'string' && /conversation\.item\.(?:input_)?audio_transcription\.delta/i.test(name)
-        const isUserCompleted = typeof name === 'string' && /conversation\.item\.(?:input_)?audio_transcription\.completed/i.test(name)
-
-        // If event is response.done or response.output_item.done, extract transcript(s) from payload.content
-        const isResponseDone = typeof name === 'string' && /response\.done|response\.output_item\.done|response\.content_part|response\.content_part\.done/i.test(name)
-        // If this is an output_item.done that contains a function_call item, process it per Zenn/MS pattern:
-        // - find item.type === 'function_call'
-        // - execute the local function (POST /api/functions/{name})
-        // - send a conversation.item.create with type 'function_call_output' and the call_id + output
-        // - send response.create to notify the server to continue
-        const isOutputItemDone = isResponseDone
-        if (isOutputItemDone) {
-          // If the payload contains a function_call item, run the function
-          const items = Array.isArray(payload?.content) ? payload.content : (payload?.output ? payload.output : (payload?.item ? [payload.item] : []))
-          const functionItems = items.filter((it: any) => it && (it.type === 'function_call' || (it.item && it.item.type === 'function_call') || (it.output && Array.isArray(it.output) && it.output.some((o:any)=>o?.type==='function_call')) || (it.name && it.type === 'function_call')))
-          if (functionItems && functionItems.length) {
-            for (const fit of functionItems) {
-              // normalize to an 'item' shape
-              const item = fit.item || fit || (fit.output && fit.output.find((o:any)=>o?.type==='function_call'))
-              const callId = item.call_id || item.callId || item.id || null
-              const funcName = item.name || item.function?.name || null
-              let args: any = {}
-              try {
-                if (typeof item.arguments === 'string' && item.arguments.trim()) args = JSON.parse(item.arguments)
-                else if (typeof item.arguments === 'object') args = item.arguments
-                else args = {}
-              } catch (e) { args = { raw: item.arguments } }
-
-              if (funcName && dc && (dc.readyState === 'open')) {
-                // 関数実行前にInput JSONを表示
-                const inputText = `🔧 ${funcName}: ${JSON.stringify(args, null, 2)}`
-                setTranscripts(prev => [...prev, { id: 'tool-input-' + String(Date.now()), speaker: 'tool', text: inputText, partial: false }])
-
-                // Call local function endpoint
-                try {
-                  const fnRes = await fetch(`/api/functions/${encodeURIComponent(funcName)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args) })
-                  const fnBodyText = await fnRes.text()
-                  let fnBody: any = null
-                  try { fnBody = JSON.parse(fnBodyText) } catch (_) { fnBody = { raw: fnBodyText } }
-
-                  // Send conversation.item.create with function_call_output per Zenn sample
-                  // Stringify function result to avoid sending large/complex objects over the datachannel
-                  let fnOutputString: string
-                  try {
-                    fnOutputString = typeof fnBody === 'string' ? fnBody : JSON.stringify(fnBody)
-                  } catch (_) {
-                    fnOutputString = String(fnBody)
-                  }
-                  const convMsg = {
-                    type: 'conversation.item.create',
-                    item: {
-                      type: 'function_call_output',
-                      call_id: callId,
-                      // use a single string payload under 'output' to match simple transport requirements
-                      output: fnOutputString
-                    }
-                  }
-                  try {
-                    await safeSend(dc, convMsg)
-                  } catch (e) { console.warn('Failed to send conversation.item.create', e) }
-
-                  // After sending the function output, ask the service to create a response so the model continues
-                  const respCreate = { type: 'response.create' }
-                  try {
-                    await sleep(500)
-                    await safeSend(dc, respCreate)
-                  } catch (e) { console.warn('Failed to send response.create', e) }
-                  // Also add assistant-visible transcript to UI
-                  const outText = (typeof fnBody === 'object') ? (JSON.stringify(fnBody, null, 2)) : String(fnBody)
-                  setTranscripts(prev => [...prev, { id: 'assistant-fn-' + String(Date.now()), speaker: 'assistant', text: outText, partial: false }])
-                } catch (e) {
-                  console.error('Function execution failed', e)
-                }
-              }
-            }
-            // we've handled function items; continue to extract any textual content below
-          }
-        }
-        if (isResponseDone) {
-          // payload.content is often an array of items with { type: 'audio'|'output_text', transcript: '...' }
-          const contents = Array.isArray(payload?.content) ? payload.content : []
-          const joined = contents.map((c: any) => (typeof c?.transcript === 'string' ? c.transcript : extractTextFromEvent(c) || '')).filter(Boolean).join('\n')
-          if (joined) {
-            setTranscripts(prev => [...prev, { id: 'assistant-done-' + String(Date.now()), speaker: 'assistant', text: joined, partial: false }])
-          }
-          return
-        }
-
-        // Handle user-side transcription events (display user utterances in chat)
-        if (isUserDelta || isUserCompleted) {
-          const itemId = (payload?.item_id || payload?.id || `user-${Date.now()}`) as string
-          const userText = extractTextFromEvent(payload) || ''
-          if (userText) {
-            const isFinal = isUserCompleted || (!!payload?.is_final) || (!!payload?.final)
-            upsertTranscript('user', String(itemId), userText, isFinal)
-          }
-          return
-        }
-
-        // Decide speaker: many realtime schemas emit "response.*" for assistant
-        const eventType = payload?.type || payload?.event || payload?.name || null
-        let speaker: 'user' | 'assistant' = 'assistant'
-        if (eventType && /response|assistant|output_audio_transcript/i.test(String(eventType))) speaker = 'assistant'
-        if (text) {
-          // Upsert using explicit transcript id matching so we don't overwrite older final messages
-          const isFinal = (!!payload?.is_final) || (!!payload?.final) || (!!payload?.committed)
-          const id = payload?.transcript_id || payload?.id || (speaker + '-' + String(payload?.sequence || Date.now()))
-          upsertTranscript(speaker, String(id), text, isFinal)
-        }
+        handleDataChannelMessage(payload)
       }
     } catch (e) {
       console.warn('createDataChannel failed', e)
     }
-
-    // Remove Web Speech API recognition fallback: we intentionally do not add local user transcripts
 
     // Handle remote track (playback)
     pc.ontrack = (ev) => {
@@ -274,97 +179,17 @@ export default function RealtimePage() {
     // In case the server opens a data channel to us
     pc.ondatachannel = (e) => {
       const channel = e.channel
-      channel.onmessage = async (ev: any) => {
-        let payload: any = null
+      channel.onmessage = (ev) => {
+        let payload: Record<string, unknown> = {}
         try {
           const parsed = JSON.parse(ev.data)
-          payload = Array.isArray(parsed) ? (parsed.find((p: any) => p && (p.content || p.transcript || p.name || p.type)) || parsed[0]) : parsed
+          payload = Array.isArray(parsed)
+            ? (parsed.find((p: Record<string, unknown>) => p && (p.content || p.transcript || p.name || p.type)) || parsed[0] || {})
+            : parsed
         } catch (_) {
           payload = { text: String(ev.data) }
         }
-        const text = extractTranscriptFromPayload(payload) || extractTextFromEvent(payload)
-
-        const name = payload?.name || payload?.type || payload?.event || payload?.topic || null
-        const isUserDelta = typeof name === 'string' && /conversation\.item\.(?:input_)?audio_transcription\.delta/i.test(name)
-        const isUserCompleted = typeof name === 'string' && /conversation\.item\.(?:input_)?audio_transcription\.completed/i.test(name)
-
-        // If event is response.done or response.output_item.done, first check for function_call items and handle them
-        const isResponseDone = typeof name === 'string' && /response\.done|response\.output_item\.done|response\.content_part|response\.content_part\.done/i.test(name)
-        // If this is an output_item.done that contains a function_call item, process it per Zenn/MS pattern
-        if (isResponseDone) {
-          const items = Array.isArray(payload?.content) ? payload.content : (payload?.output ? payload.output : (payload?.item ? [payload.item] : []))
-          const functionItems = items.filter((it: any) => it && (it.type === 'function_call' || (it.item && it.item.type === 'function_call') || (it.output && Array.isArray(it.output) && it.output.some((o:any)=>o?.type==='function_call'))))
-          if (functionItems && functionItems.length) {
-            for (const fit of functionItems) {
-              const item = fit.item || fit || (fit.output && fit.output.find((o:any)=>o?.type==='function_call'))
-              const callId = item.call_id || item.callId || item.id || null
-              const funcName = item.name || item.function?.name || null
-              let args: any = {}
-              try {
-                if (typeof item.arguments === 'string' && item.arguments.trim()) args = JSON.parse(item.arguments)
-                else if (typeof item.arguments === 'object') args = item.arguments
-                else args = {}
-              } catch (e) { args = { raw: item.arguments } }
-
-              if (funcName && channel && (channel.readyState === 'open')) {
-                // 関数実行前にInput JSONを表示
-                const inputText = `🔧 ${funcName}: ${JSON.stringify(args, null, 2)}`
-                setTranscripts(prev => [...prev, { id: 'tool-input-' + String(Date.now()), speaker: 'tool', text: inputText, partial: false }])
-
-                try {
-                  const fnRes = await fetch(`/api/functions/${encodeURIComponent(funcName)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args) })
-                  const fnBodyText = await fnRes.text()
-                  let fnBody: any = null
-                  try { fnBody = JSON.parse(fnBodyText) } catch (_) { fnBody = { raw: fnBodyText } }
-
-                  const convMsg = { type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: fnBody } }
-                  try {
-                    await safeSend(channel, convMsg)
-                  } catch (e) { console.warn('Failed to send conversation.item.create', e) }
-
-                  const respCreate = { type: 'response.create' }
-                  try {
-                    await sleep(500)
-                    await safeSend(channel, respCreate)
-                  } catch (e) { console.warn('Failed to send response.create', e) }
-
-                  const outText = (typeof fnBody === 'object') ? (JSON.stringify(fnBody, null, 2)) : String(fnBody)
-                  setTranscripts(prev => [...prev, { id: 'assistant-fn-' + String(Date.now()), speaker: 'assistant', text: outText, partial: false }])
-                } catch (e) {
-                  console.error('Function execution failed', e)
-                }
-              }
-            }
-            // don't return here; allow textual extraction below
-          }
-          const contents = Array.isArray(payload?.content) ? payload.content : []
-          const joined = contents.map((c: any) => (typeof c?.transcript === 'string' ? c.transcript : extractTextFromEvent(c) || '')).filter(Boolean).join('\n')
-          if (joined) {
-            setTranscripts(prev => [...prev, { id: 'assistant-done-' + String(Date.now()), speaker: 'assistant', text: joined, partial: false }])
-          }
-          return
-        }
-
-        // Handle user transcription events (display user utterances in chat)
-        if (isUserDelta || isUserCompleted) {
-          const itemId = (payload?.item_id || payload?.id || `user-${Date.now()}`) as string
-          const userText = extractTextFromEvent(payload) || ''
-          if (userText) {
-            const isFinal = isUserCompleted || (!!payload?.is_final) || (!!payload?.final)
-            upsertTranscript('user', String(itemId), userText, isFinal)
-          }
-          return
-        }
-
-        const eventType = payload?.type || payload?.event || payload?.name || null
-        let speaker: 'user' | 'assistant' = 'assistant'
-        if (eventType && /response|assistant|output_audio_transcript/i.test(String(eventType))) speaker = 'assistant'
-        const isFinal = (!!payload?.is_final) || (!!payload?.final) || (!!payload?.committed)
-        const id = payload?.transcript_id || payload?.id || (speaker + '-' + String(payload?.sequence || Date.now()))
-        if (text) {
-          // use upsert to preserve chat history and only update matching partial by id
-          upsertTranscript(speaker, String(id), text, isFinal)
-        }
+        handleDataChannelMessage(payload)
       }
     }
 
@@ -375,7 +200,6 @@ export default function RealtimePage() {
       return
     }
     const session = await res.json()
-    // Server returns normalized object: { raw, client_secret, realtimeUrl }
     const ephemeralKey = session?.client_secret
     const candidateRealtimeUrl = session?.realtimeUrl || null
     if (!ephemeralKey) {
@@ -383,13 +207,13 @@ export default function RealtimePage() {
       setStatus('no-ephemeral')
       return
     }
-  setStatus('creating-offer')
+
+    setStatus('creating-offer')
     const offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
 
-    // Determine target realtime endpoint. Prefer server-provided realtimeUrl; otherwise construct from public region env.
-    // Recommended region env: NEXT_PUBLIC_AZURE_OPENAI_REGION (e.g. 'eastus2')
-    const region = (process.env.NEXT_PUBLIC_AZURE_OPENAI_REGION) || undefined
+    // Determine target realtime endpoint
+    const region = process.env.NEXT_PUBLIC_AZURE_OPENAI_REGION || undefined
     let targetUrl = candidateRealtimeUrl
     if (!targetUrl) {
       if (!region) {
@@ -397,7 +221,6 @@ export default function RealtimePage() {
         setStatus('no-target')
         return
       }
-      // Per docs: https://<region>.realtimeapi-preview.ai.azure.com/v1/realtimertc?model=<deployment>
       const deployment = session?.raw?.deployment || session?.raw?.model || process.env.NEXT_PUBLIC_AZURE_OPENAI_DEPLOYMENT
       if (!deployment) {
         console.error('No deployment/model found for realtime URL construction', session)
@@ -423,7 +246,7 @@ export default function RealtimePage() {
     const answerSdp = await sdpResp.text()
     await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
 
-  setStatus('connected')
+    setStatus('connected')
   }
 
   function stop() {
@@ -466,7 +289,7 @@ export default function RealtimePage() {
         </div>
       </div>
 
-      <h2>Realtime audio (WebRTC) — POC</h2>
+      <h2>Realtime audio (WebRTC) — MCP Server POC</h2>
       <p>Status: {status}</p>
       <div>
         <button onClick={start} disabled={status === 'connected' || status === 'creating-pc'}>Start</button>
@@ -474,29 +297,26 @@ export default function RealtimePage() {
       </div>
       <audio id="remote-audio" autoPlay controls style={{marginTop: 12}} />
       <div style={{marginTop: 12}}>
-        <small>Note: This is a minimal POC. Adjust server session API and SDP exchange per Azure docs.</small>
+        <small>Note: Tools are handled by MCP Server. Azure OpenAI connects directly to the MCP server.</small>
       </div>
       <div style={{marginTop:12}}>
         <h4>Chat (Realtime)</h4>
-  <div ref={chatContainerRef} style={{border:'1px solid #ddd', padding:8, height:320, overflow:'auto', background:'#ffffff', display:'flex', flexDirection:'column', gap:8}}>
+        <div ref={chatContainerRef} style={{border:'1px solid #ddd', padding:8, height:320, overflow:'auto', background:'#ffffff', display:'flex', flexDirection:'column', gap:8}}>
           {transcripts.length === 0 ? (
             <div style={{color:'#666', textAlign:'center', padding:12}}>No speech yet</div>
           ) : null}
-          {/* Render all transcripts (user and assistant) */}
           {transcripts.map(t => (
             <div key={t.id} style={{display:'flex', justifyContent: t.speaker === 'user' ? 'flex-end' : 'flex-start'}}>
               <div style={{
                 maxWidth:'75%',
                 padding:'10px 12px',
                 borderRadius:12,
-                background: t.speaker === 'user' ? '#0b86ff'
-                         : t.speaker === 'tool' ? '#e5e7eb'
-                         : '#f1f5f9',
+                background: t.speaker === 'user' ? '#0b86ff' : '#f1f5f9',
                 color: t.speaker === 'user' ? '#fff' : '#111',
                 boxShadow:'0 1px 2px rgba(0,0,0,0.04)'
               }}>
                 <div style={{fontSize:12, marginBottom:6, opacity:0.8}}>
-                  {t.speaker === 'user' ? 'You' : t.speaker === 'tool' ? 'Tool Call' : 'Assistant'}
+                  {t.speaker === 'user' ? 'You' : 'Assistant'}
                 </div>
                 <div style={{whiteSpace:'pre-wrap'}}>{t.text}</div>
                 {t.partial ? <div style={{fontSize:11, opacity:0.7, marginTop:6}}>(partial)</div> : null}
@@ -510,25 +330,29 @@ export default function RealtimePage() {
 }
 
 // Best-effort extraction of text from incoming data channel event payloads.
-function extractTextFromEvent(obj: any): string | null {
+function extractTextFromEvent(obj: unknown): string | null {
   if (!obj) return null
-  // Common fields used by different realtime event schemas
   if (typeof obj === 'string') return obj
-  if (obj.text && typeof obj.text === 'string') return obj.text
-  if (obj.transcript && typeof obj.transcript === 'string') return obj.transcript
-  if (obj.payload) return extractTextFromEvent(obj.payload)
-  if (obj.message) return extractTextFromEvent(obj.message)
+  if (typeof obj !== 'object') return null
+
+  const record = obj as Record<string, unknown>
+  if (record.text && typeof record.text === 'string') return record.text
+  if (record.transcript && typeof record.transcript === 'string') return record.transcript
+  if (record.payload) return extractTextFromEvent(record.payload)
+  if (record.message) return extractTextFromEvent(record.message)
+
   // Try to find any string deeply
   try {
-    const stack = [obj]
+    const stack: unknown[] = [obj]
     while (stack.length) {
       const cur = stack.pop()
       if (!cur) continue
       if (typeof cur === 'string') return cur
-      if (Array.isArray(cur)) { for (const v of cur) stack.push(v) }
-      else if (typeof cur === 'object') {
+      if (Array.isArray(cur)) {
+        for (const v of cur) stack.push(v)
+      } else if (typeof cur === 'object') {
         for (const k of Object.keys(cur)) {
-          const v = cur[k]
+          const v = (cur as Record<string, unknown>)[k]
           if (typeof v === 'string') return v
           if (typeof v === 'object') stack.push(v)
         }
@@ -539,24 +363,21 @@ function extractTextFromEvent(obj: any): string | null {
 }
 
 // Prefer transcripts from payload.content[*].transcript when present.
-function extractTranscriptFromPayload(payload: any): string | null {
+function extractTranscriptFromPayload(payload: Record<string, unknown>): string | null {
   if (!payload) return null
   try {
-    // If payload.content is an array of items that include 'transcript', join them
     if (Array.isArray(payload.content) && payload.content.length > 0) {
-      const pieces = payload.content.map((item: any) => {
+      const pieces = payload.content.map((item: unknown) => {
         if (!item) return ''
-        if (typeof item.transcript === 'string' && item.transcript.trim()) return item.transcript.trim()
-        // sometimes the transcript is nested under 'payload' or 'message'
-        if (item.payload) return extractTextFromEvent(item.payload) || ''
-        if (item.message) return extractTextFromEvent(item.message) || ''
-        // fallback: try to stringify any text-like parts
+        const record = item as Record<string, unknown>
+        if (typeof record.transcript === 'string' && record.transcript.trim()) return record.transcript.trim()
+        if (record.payload) return extractTextFromEvent(record.payload) || ''
+        if (record.message) return extractTextFromEvent(record.message) || ''
         return extractTextFromEvent(item) || ''
       }).filter(Boolean)
       if (pieces.length) return pieces.join('\n')
     }
 
-    // Some realtime items embed at top level as payload.transcript or content[0].text
     if (typeof payload.transcript === 'string' && payload.transcript.trim()) return payload.transcript.trim()
     if (payload.content && typeof payload.content === 'string' && payload.content.trim()) return payload.content.trim()
   } catch (_) {}

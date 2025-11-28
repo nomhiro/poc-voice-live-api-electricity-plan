@@ -8,34 +8,47 @@ This is a Next.js TypeScript POC application that demonstrates WebRTC-based voic
 
 ## Development Commands
 
+### Next.js App
 - `npm install` - Install dependencies
 - `npm run dev` - Start development server (http://localhost:3000)
 - `npm run build` - Build for production
 - `npm start` - Start production server
 - `npm run lint` - Run ESLint
 
+### MCP Server
+- `cd mcp-server && npm install` - Install MCP server dependencies
+- `cd mcp-server && npm run build` - Build MCP server
+- `cd mcp-server && npm start` - Start MCP server (http://localhost:7071)
+
+### Local Development with ngrok
+For Azure OpenAI to connect to local MCP server:
+1. Start MCP server: `cd mcp-server && npm start`
+2. Expose via ngrok: `ngrok http 7071`
+3. Set `MCP_SERVER_URL` in `.env.local` to ngrok URL + `/runtime/webhooks/mcp`
+
 ## Architecture
 
-The application follows Next.js 13+ app router patterns:
+The application uses an MCP (Model Context Protocol) server architecture:
 
-- `app/api/realtime/session/` - Creates Azure OpenAI Realtime sessions with configured AI tools
-- `app/api/functions/` - RESTful endpoints callable by the AI agent
-  - `get_customer_info` - Customer verification and contract info
-  - `get_billing_history` - Past billing records
-  - `get_current_usage` - Real-time usage (smart meter only)
-  - `list_available_plans` - Available electricity plans
-  - `simulate_plan_change` - Plan change cost simulation
-  - `submit_plan_change_request` - Submit plan change request
+### Next.js Frontend (`app/`)
+- `app/api/realtime/session/` - Creates Azure OpenAI Realtime sessions with MCP configuration
 - `app/realtime/` - Frontend voice interface using WebRTC for real-time audio
-- `lib/cosmosClient.ts` - Azure Cosmos DB client with fallback to sample data
-- `lib/types/electricity.ts` - TypeScript type definitions
-- `lib/sampleData/electricity.ts` - Sample data for POC
+
+### MCP Server (`mcp-server/`)
+Azure Functions-based MCP server that provides tools to Azure OpenAI:
+- `get_customer_info` - Customer verification and contract info
+- `get_billing_history` - Past billing records
+- `get_current_usage` - Real-time usage (smart meter only)
+- `list_available_plans` - Available electricity plans
+- `simulate_plan_change` - Plan change cost simulation
+- `submit_plan_change_request` - Submit plan change request
 
 ### Key Data Flow
-1. Client requests session → Server creates Azure Realtime session
+1. Client requests session → Server creates Azure Realtime session with MCP config
 2. WebRTC connection established between browser and Azure
-3. AI agent processes voice → Calls function endpoints → Returns responses
-4. Function endpoints query Cosmos DB (or use sample data)
+3. Azure OpenAI connects directly to MCP server for tool discovery (`tools/list`)
+4. AI agent processes voice → Azure calls MCP tools (`tools/call`) → Returns responses
+5. MCP server queries Cosmos DB (or uses sample data)
 
 ## Environment Variables
 
@@ -45,6 +58,7 @@ Required (set in `.env.local`):
 
 Optional:
 - `AZURE_OPENAI_DEPLOYMENT` - Model deployment name (defaults to 'gpt-realtime')
+- `MCP_SERVER_URL` - MCP server URL (defaults to 'http://localhost:7071/runtime/webhooks/mcp')
 - `COSMOS_ENDPOINT`, `COSMOS_KEY` - Cosmos DB configuration
 - `COSMOS_DB` - Database name (defaults to 'electricity-support-db')
 - `COSMOS_CUSTOMERS_CONTAINER` - Customers container (defaults to 'customers')
@@ -73,10 +87,11 @@ Optional:
 ## Technology Stack
 
 - **Frontend**: React 18.2 with TypeScript, WebRTC APIs
-- **Backend**: Next.js API routes
+- **Backend**: Next.js API routes + Azure Functions MCP server
 - **Database**: Azure Cosmos DB (optional, falls back to sample data)
-- **AI**: Azure OpenAI Realtime API with function calling
+- **AI**: Azure OpenAI Realtime API with native MCP support
 - **Audio**: WebRTC peer connections, data channels for events
+- **MCP**: Model Context Protocol via Azure Functions Extension
 - **Infrastructure**: Azure Bicep templates in `infra/`
 
 ## Code Conventions
@@ -99,6 +114,7 @@ When completing tasks:
 ## Key URLs
 
 - Main application: http://localhost:3000
-- Voice demo: http://localhost:3000/realtime  
+- Voice demo: http://localhost:3000/realtime
 - Session API: http://localhost:3000/api/realtime/session
 - Seed data: POST http://localhost:3000/api/admin/seed-electricity-data
+- MCP Server: http://localhost:7071/runtime/webhooks/mcp
